@@ -1,0 +1,419 @@
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ==========================
+#   МОДЕЛІ СУТНОСТЕЙ
+# ==========================
+
+@dataclass
+class Student:
+    last_name: str
+    first_name: str
+    patronymic: str
+    birth_year: int
+    gender: str          # 'M' або 'F'
+    avg_grade: float
+    school_class: 'SchoolClass' = field(repr=False, default=None)
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.last_name} {self.first_name} {self.patronymic}"
+
+
+@dataclass
+class Worker:
+    last_name: str
+    first_name: str
+    patronymic: str
+    position: str  # Director / Teacher / Guard
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.last_name} {self.first_name} {self.patronymic}"
+
+
+@dataclass
+class Director(Worker):
+    def __init__(self, last_name, first_name, patronymic):
+        super().__init__(last_name, first_name, patronymic, position="Director")
+
+
+@dataclass
+class Teacher(Worker):
+    subject: str = ""
+
+    def __init__(self, last_name, first_name, patronymic, subject: str):
+        super().__init__(last_name, first_name, patronymic, position="Teacher")
+        self.subject = subject
+
+
+@dataclass
+class Guard(Worker):
+    def __init__(self, last_name, first_name, patronymic):
+        super().__init__(last_name, first_name, patronymic, position="Guard")
+
+
+@dataclass
+class SchoolClass:
+    class_id: int
+    grade: int          # паралель (1–11)
+    letter: str         # вертикаль (А, Б, В, …)
+    students: List[Student] = field(default_factory=list)
+
+    @property
+    def name(self) -> str:
+        # Наприклад, "7А"
+        return f"{self.grade}{self.letter}"
+
+    def add_student(self, student: Student) -> None:
+        student.school_class = self
+        self.students.append(student)
+
+    def size(self) -> int:
+        return len(self.students)
+
+    def avg_grade(self) -> float:
+        if not self.students:
+            return 0.0
+        return sum(s.avg_grade for s in self.students) / len(self.students)
+
+
+@dataclass
+class School:
+    name: str
+    classes: List[SchoolClass] = field(default_factory=list)
+    workers: List[Worker] = field(default_factory=list)
+
+    def add_class(self, school_class: SchoolClass) -> None:
+        self.classes.append(school_class)
+
+    def add_worker(self, worker: Worker) -> None:
+        self.workers.append(worker)
+
+    # ==== Допоміжні методи ====
+
+    def all_students(self) -> List[Student]:
+        return [s for c in self.classes for s in c.students]
+
+    # ==== Статистика (п.2) ====
+
+    def total_students(self) -> int:
+        return len(self.all_students())
+
+    def gender_percentages(self) -> Dict[str, float]:
+        students = self.all_students()
+        if not students:
+            return {"M": 0.0, "F": 0.0}
+        m = sum(1 for s in students if str(s.gender).upper() == "M")
+        f = sum(1 for s in students if str(s.gender).upper() == "F")
+        total = len(students)
+        return {
+            "M": 100 * m / total,
+            "F": 100 * f / total
+        }
+
+    def avg_students_per_class(self) -> float:
+        if not self.classes:
+            return 0.0
+        return sum(c.size() for c in self.classes) / len(self.classes)
+
+    def max_class_size(self) -> Optional[tuple[int, SchoolClass]]:
+        if not self.classes:
+            return None
+        c = max(self.classes, key=lambda c: c.size())
+        return c.size(), c
+
+    def min_class_size(self) -> Optional[tuple[int, SchoolClass]]:
+        if not self.classes:
+            return None
+        c = min(self.classes, key=lambda c: c.size())
+        return c.size(), c
+
+    # ==== «Переведення» класів на рік вперед (п.4) ====
+
+    def promote_classes(self):
+        """
+        11-й клас зникає,
+        решта: n -> n+1; 1-го класу в результаті немає.
+        Учні залишаються ті самі, лише змінюється паралель класу.
+        """
+        new_classes: List[SchoolClass] = []
+        for c in self.classes:
+            if c.grade == 11:
+                # 11 клас зникає
+                continue
+            new_grade = c.grade + 1
+
+            promoted_class = SchoolClass(
+                class_id=c.class_id,
+                grade=new_grade,
+                letter=c.letter,
+                students=c.students
+            )
+            # Оновлюємо посилання в учнів
+            for s in promoted_class.students:
+                s.school_class = promoted_class
+
+            new_classes.append(promoted_class)
+
+        self.classes = new_classes
+
+
+# ==========================
+#   ЗАВАНТАЖЕННЯ CSV (п.1)
+# ==========================
+
+def load_school_from_csv(
+    school_name: str,
+    classes_csv_path: str,
+    students_csv_path: str
+) -> School:
+    # Завантажуємо CSV
+    df_classes = pd.read_csv(classes_csv_path)
+    df_students = pd.read_csv(students_csv_path)
+
+    # Викидаємо повністю порожні рядки
+    df_classes = df_classes.dropna(how="all")
+    df_students = df_students.dropna(how="all")
+
+    school = School(name=school_name)
+
+    # Створюємо об'єкти класів
+    id_to_class: Dict[int, SchoolClass] = {}
+    for _, row in df_classes.iterrows():
+        # пропускаємо рядки без обов'язкових полів
+        if pd.isna(row.get("class_id")) or pd.isna(row.get("grade")) or pd.isna(row.get("letter")):
+            continue
+
+        try:
+            class_id = int(row["class_id"])
+            grade = int(row["grade"])
+            letter = str(row["letter"])
+        except (ValueError, TypeError):
+            # якщо раптом не можна конвертувати – пропускаємо цей рядок
+            continue
+
+        c = SchoolClass(
+            class_id=class_id,
+            grade=grade,
+            letter=letter
+        )
+        school.add_class(c)
+        id_to_class[class_id] = c
+
+    # Створюємо учнів і додаємо їх до класів
+    for _, row in df_students.iterrows():
+        # class_id обов'язковий
+        if pd.isna(row.get("class_id")):
+            continue
+
+        try:
+            class_id = int(row["class_id"])
+        except (ValueError, TypeError):
+            continue
+
+        if class_id not in id_to_class:
+            # якщо є учень з неіснуючим class_id – пропускаємо
+            continue
+
+        # перевіримо інші поля, мінімум birth_year та avg_grade
+        if pd.isna(row.get("birth_year")) or pd.isna(row.get("avg_grade")):
+            continue
+
+        try:
+            birth_year = int(row["birth_year"])
+            avg_grade = float(row["avg_grade"])
+        except (ValueError, TypeError):
+            continue
+
+        last_name = str(row.get("last_name", ""))
+        first_name = str(row.get("first_name", ""))
+        patronymic = str(row.get("patronymic", ""))
+        gender = str(row.get("gender", ""))
+
+        student = Student(
+            last_name=last_name,
+            first_name=first_name,
+            patronymic=patronymic,
+            birth_year=birth_year,
+            gender=gender,
+            avg_grade=avg_grade
+        )
+        id_to_class[class_id].add_student(student)
+
+    return school
+
+
+# ==========================
+#   ВИВІД СТАТИСТИКИ (п.2)
+# ==========================
+
+def print_school_stats(school: School, title: str = "Статистика школи"):
+    print("=" * 50)
+    print(title)
+    print("=" * 50)
+
+    total = school.total_students()
+    print(f"Загальна кількість учнів: {total}")
+
+    genders = school.gender_percentages()
+    print(f"Відсоток хлопців: {genders['M']:.2f}%")
+    print(f"Відсоток дівчат: {genders['F']:.2f}%")
+
+    avg_per_class = school.avg_students_per_class()
+    print(f"Середня кількість учнів у класах: {avg_per_class:.2f}")
+
+    max_info = school.max_class_size()
+    if max_info:
+        max_size, max_class = max_info
+        print(
+            f"Максимальна кількість учнів: {max_size} у класі {max_class.name}"
+        )
+
+    min_info = school.min_class_size()
+    if min_info:
+        min_size, min_class = min_info
+        print(
+            f"Мінімальна кількість учнів: {min_size} у класі {min_class.name}"
+        )
+    print()  # порожній рядок
+
+
+# ==========================
+#   ГРАФІКИ (п.3)
+# ==========================
+
+def plot_students_by_grade(school: School):
+    """
+    a) Розподіл кількості учнів по паралелях.
+    """
+    data: Dict[int, int] = {}
+    for c in school.classes:
+        data.setdefault(c.grade, 0)
+        data[c.grade] += c.size()
+
+    if not data:
+        print("Немає даних для побудови графіка по паралелях.")
+        return
+
+    grades = sorted(data.keys())
+    counts = [data[g] for g in grades]
+
+    plt.figure()
+    plt.bar(grades, counts)
+    plt.xlabel("Паралель (клас)")
+    plt.ylabel("Кількість учнів")
+    plt.title("Розподіл кількості учнів по паралелях")
+    plt.show()
+
+
+def plot_avg_students_by_letter(school: School):
+    """
+    b) Розподіл середньої кількості учнів по вертикалях.
+    """
+    sizes_by_letter: Dict[str, List[int]] = {}
+    for c in school.classes:
+        sizes_by_letter.setdefault(c.letter, []).append(c.size())
+
+    if not sizes_by_letter:
+        print("Немає даних для побудови графіка по вертикалях.")
+        return
+
+    letters = sorted(sizes_by_letter.keys())
+    avg_sizes = [
+        sum(sizes_by_letter[l]) / len(sizes_by_letter[l]) for l in letters
+    ]
+
+    plt.figure()
+    plt.bar(letters, avg_sizes)
+    plt.xlabel("Вертикаль (літера)")
+    plt.ylabel("Середня кількість учнів у класі")
+    plt.title("Середня кількість учнів по вертикалях")
+    plt.show()
+
+
+def plot_students_by_birth_year(school: School):
+    """
+    c) Лінійний графік кількості учнів від року народження.
+    """
+    students = school.all_students()
+    data: Dict[int, int] = {}
+    for s in students:
+        data.setdefault(s.birth_year, 0)
+        data[s.birth_year] += 1
+
+    if not data:
+        print("Немає даних для побудови графіка по роках народження.")
+        return
+
+    years = sorted(data.keys())
+    counts = [data[y] for y in years]
+
+    plt.figure()
+    plt.plot(years, counts, marker="o")
+    plt.xlabel("Рік народження")
+    plt.ylabel("Кількість учнів")
+    plt.title("Кількість учнів за роками народження")
+    plt.grid(True)
+    plt.show()
+
+
+def plot_grade_scatter(school: School):
+    """
+    d) Scatter: середня оцінка учня (Y) від паралелі класу (X).
+    """
+    xs: List[int] = []
+    ys: List[float] = []
+
+    for c in school.classes:
+        for s in c.students:
+            xs.append(c.grade)
+            ys.append(s.avg_grade)
+
+    if not xs:
+        print("Немає даних для scatter-графіка.")
+        return
+
+    plt.figure()
+    plt.scatter(xs, ys)
+    plt.xlabel("Клас (паралель)")
+    plt.ylabel("Середня оцінка учня")
+    plt.title("Залежність середньої оцінки учнів від класу")
+    plt.grid(True)
+    plt.show()
+
+
+# ==========================
+#   ГОЛОВНИЙ СЦЕНАРІЙ (1–5)
+# ==========================
+
+if __name__ == "__main__":
+    # !!! Підстав свої шляхи до CSV !!!
+    classes_path = "classes.csv"
+    students_path = "students.csv"
+
+    school = load_school_from_csv("Моя школа", classes_path, students_path)
+
+    # 2. Статистика до переведення
+    print_school_stats(school, "Статистика ДО переведення")
+
+    # 3. Графіки до переведення
+    plot_students_by_grade(school)
+    plot_avg_students_by_letter(school)
+    plot_students_by_birth_year(school)
+    plot_grade_scatter(school)
+
+    # 4. Переведення класів на рік вперед
+    school.promote_classes()
+
+    # 5. Статистика після переведення
+    print_school_stats(school, "Статистика ПІСЛЯ переведення")
+
+    # (за бажанням) графіки після переведення
+    plot_students_by_grade(school)
+    plot_avg_students_by_letter(school)
+    plot_students_by_birth_year(school)
+    plot_grade_scatter(school)
