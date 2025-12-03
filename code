@@ -176,7 +176,7 @@ def load_school_from_csv(
     df_students = pd.read_csv(students_csv_path)
 
     # Викидаємо повністю порожні рядки
-    df_classes = df_classes.dropna(how="all")
+    df_classes = df_classes.dropna(subset=["class_id", "grade", "letter"])
     df_students = df_students.dropna(how="all")
 
     school = School(name=school_name)
